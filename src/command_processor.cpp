@@ -505,6 +505,7 @@ static void IRAM_ATTR load_nvs(void) {
 
     validateRegData();
 
+#if CORE_DEBUG_LEVEL > 0
     auto d = (const uint8_t*)&_reg_tx_data;
     for (size_t r = 0; r < 8; ++r) {
         ESP_LOGI(LOGNAME,
@@ -514,6 +515,7 @@ static void IRAM_ATTR load_nvs(void) {
                  d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
         d += 16;
     }
+#endif
 }
 
 static bool IRAM_ATTR command(void) {
@@ -593,8 +595,40 @@ void setup(void) {
     rtc_clk_cpu_freq_mhz_to_config(80, &_cpu_freq_conf_80);
     rtc_clk_cpu_freq_set_config_fast(&_cpu_freq_conf_80);
 
+    gpio_config_t io_conf;
+    io_conf.mode         = GPIO_MODE_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    io_conf.pin_bit_mask = 1 << GPIO_NUM_0
+                         | 1 << GPIO_NUM_2
+                         | 1 << GPIO_NUM_4
+                         | 1 << GPIO_NUM_5
+                         | 1 << GPIO_NUM_9
+                         | 1 << GPIO_NUM_10
+                         | 1 << GPIO_NUM_12
+                         | 1 << GPIO_NUM_13
+                         | 1 << GPIO_NUM_14
+                         | 1 << GPIO_NUM_15
+                         | 1 << GPIO_NUM_18
+                         | 1 << GPIO_NUM_19
+                         | 1 << GPIO_NUM_23
+                         | 1 << GPIO_NUM_26
+                         | 1 << GPIO_NUM_27
+#if CORE_DEBUG_LEVEL == 0
+                         | 1 << GPIO_NUM_1
+                         | 1 << GPIO_NUM_3
+#endif
+                         ;
+    gpio_config(&io_conf);
+
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
+    io_conf.pin_bit_mask = (uint64_t)1 << PIN_BUTTON;
+    io_conf.mode         = GPIO_MODE_INPUT;
+    gpio_config(&io_conf);
+
     _led.init(PIN_RGB_LED);
-    _led.setColor(0, 4, 0);
+    _led.setColor(0, 2, 0);
 
     // buzzer start beep
     ledcAttachPin(PIN_BUZZER, BUZZER_LEDC_CHAN);
@@ -628,13 +662,6 @@ void setup(void) {
     _i2c_ex.init(1, PIN_EX_SDA, PIN_EX_SCL, _reg_tx_data.config.i2c_addr);
     _led.setColor(0x1F0000);
 
-    gpio_config_t io_conf;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
-    io_conf.intr_type    = GPIO_INTR_DISABLE;
-    io_conf.pin_bit_mask = (uint64_t)1 << PIN_BUTTON;
-    io_conf.mode         = GPIO_MODE_INPUT;
-    gpio_config(&io_conf);
 
     TaskHandle_t idle = xTaskGetIdleTaskHandleForCPU(PRO_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
@@ -646,7 +673,7 @@ void setup(void) {
     _led.setColor(0);
 }
 
-void loop(void) {
+void IRAM_ATTR loop(void) {
     bool reg_mod = false;
     if (ulTaskNotifyTake(pdTRUE, 5)) {
         if (_reg_modified) {

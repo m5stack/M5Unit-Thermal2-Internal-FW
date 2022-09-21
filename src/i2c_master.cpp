@@ -159,8 +159,8 @@ void I2C_Master::i2c_stop(void) {
     periph_module_reset(mod);
     // gpio_set_level(pin_sda, 1); // STOP, SDA low -> high while SCL is HIGH
     i2c_set_pin((i2c_port_t)_i2c_port, _pin_sda, _pin_scl,
-                gpio_pullup_t::GPIO_PULLUP_ENABLE,
-                gpio_pullup_t::GPIO_PULLUP_ENABLE, I2C_MODE_MASTER);
+                gpio_pullup_t::GPIO_PULLUP_DISABLE,
+                gpio_pullup_t::GPIO_PULLUP_DISABLE, I2C_MODE_MASTER);
 }
 
 bool I2C_Master::i2c_wait(bool flg_stop) {
