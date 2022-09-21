@@ -923,9 +923,6 @@ void IRAM_ATTR closeData(void) {
     _param_need_count = 1;
     _param_resetindex = 0;
 
-    _write_reg_index = -1;
-    _read_reg_index  = 0;
-
     if (_save_nvs_flg == save_process_state_t::save_prepare) {
         _save_nvs_flg = save_process_state_t::save_request;
     };
@@ -942,15 +939,21 @@ bool IRAM_ATTR addData(std::uint8_t value) {
         _param_resetindex = 0;
         // ESP_EARLY_LOGE(LOGNAME, "CMD:%02x", value);
         switch (value) {
-            default:
-                _i2c_ex.setTxData(&_i2c_tx_data[value], 8);
-                _write_reg_index  = value;
-                _read_reg_index   = value + 8;
+            default: {
+                uint32_t regindex =
+                    (value > 0x80) ? 0x80 + (value - 0x80) * 32 : value;
+                _read_reg_index = regindex;
+                if (regindex < UNIT_REGISTER_SIZE) {
+                    _i2c_ex.setTxData(&_i2c_tx_data[regindex], 8);
+                    _read_reg_index = regindex + 8;
+                }
+                _write_reg_index  = regindex;
                 _last_command     = CMD_REG_ACCESS;
                 _params[0]        = CMD_REG_ACCESS;
                 _param_need_count = 2;
                 _param_resetindex = 1;
                 return false;
+            }
 
             case CMD_UPDATE_END:
                 _param_need_count = 4;
