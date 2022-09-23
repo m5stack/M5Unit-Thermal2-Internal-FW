@@ -1023,6 +1023,7 @@ bool IRAM_ATTR addData(std::uint8_t value) {
             case CMD_UPDATE_BEGIN:
                 if ((_params[1] == DEVICE_ID_0) &&
                     (_params[2] == DEVICE_ID_1) && (_params[0] == _params[3])) {
+                    rtc_clk_cpu_freq_set_config_fast(&_cpu_freq_conf_160);
                     ESP_EARLY_LOGD(LOGNAME, "CMD_UPDATE_BEGIN");
                     _firmupdate_state = firmupdate_state_t::wait_data;
                     _firmupdate_index = 0;

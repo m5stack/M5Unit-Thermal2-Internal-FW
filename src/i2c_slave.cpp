@@ -142,7 +142,6 @@ static void IRAM_ATTR i2c_isr_handler(void* arg) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(p_i2c->getMainTaskHandle(),
                             &xHigherPriorityTaskWoken);
-        // portYIELD_FROM_ISR();
     }
 }
 
