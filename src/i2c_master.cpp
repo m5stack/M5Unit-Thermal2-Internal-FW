@@ -197,7 +197,7 @@ bool I2C_Master::i2c_wait(bool flg_stop) {
             // if (prev != us_limit)
             // {
             //   prev = us_limit;
-            //   ESP_LOGE("us_limit","us_limit:%d", us_limit);
+            //   ESP_LOGW("us_limit","us_limit:%d", us_limit);
             // }
             do {
                 int_raw.val = i2c_dev->int_raw.val;
@@ -474,7 +474,7 @@ bool I2C_Master::writeBytes(const uint8_t *data, size_t length) {
     size_t len                        = ((length - 1) & (txfifo_limit - 1)) + 1;
     do {
         if (!i2c_wait(false)) {
-            ESP_LOGE("I2C_Master", "writeBytes error : ack wait");
+            ESP_LOGW("I2C_Master", "writeBytes error : ack wait");
             return false;
         }
         size_t idx = 0;
@@ -514,7 +514,7 @@ bool I2C_Master::writeWords(const uint16_t *data, size_t length) {
     size_t len                        = ((length - 1) & (txfifo_limit - 1)) + 1;
     do {
         if (!i2c_wait(false)) {
-            ESP_LOGE("I2C_Master", "writeWords error : ack wait");
+            ESP_LOGW("I2C_Master", "writeWords error : ack wait");
             return false;
         }
         size_t idx = 0;
@@ -564,7 +564,7 @@ bool I2C_Master::readBytes(uint8_t *readdata, size_t length, bool last_nack) {
         length -= len;
         res = i2c_wait(false);
         if (!res) {
-            ESP_LOGE("I2C_Master", "readBytes error : ack wait");
+            ESP_LOGW("I2C_Master", "readBytes error : ack wait");
             break;
         }
         if (length == 0 && last_nack) {
@@ -600,7 +600,7 @@ bool I2C_Master::readBytes(uint8_t *readdata, size_t length, bool last_nack) {
                 *readdata++ = *fifo_addr;
             } else {
                 i2c_stop();
-                ESP_LOGE("I2C_Master", "readBytes error : read timeout");
+                ESP_LOGW("I2C_Master", "readBytes error : read timeout");
                 res    = false;
                 _state = state_t::state_error;
                 return res;
@@ -641,7 +641,7 @@ bool I2C_Master::readWords(uint16_t *readdata, size_t length, bool last_nack) {
         length -= len;
         res = i2c_wait(false);
         if (!res) {
-            ESP_LOGE("I2C_Master", "readWords error : ack wait");
+            ESP_LOGW("I2C_Master", "readWords error : ack wait");
             break;
         }
         i2c_set_cmd(dev, 0, i2c_cmd_read, (len << 1) - 1);
@@ -672,7 +672,7 @@ bool I2C_Master::readWords(uint16_t *readdata, size_t length, bool last_nack) {
                 *readdata++ = tmp + *fifo_addr;
             } else {
                 i2c_stop();
-                ESP_LOGE("I2C_Master", "readWords error : read timeout");
+                ESP_LOGW("I2C_Master", "readWords error : read timeout");
                 res    = false;
                 _state = state_t::state_error;
             }

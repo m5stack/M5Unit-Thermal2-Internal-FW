@@ -174,12 +174,7 @@ enum alarm_state_t {
 };
 static alarm_state_t _current_alarm_state = alarm_change_setting;
 
-enum save_process_state_t {
-    save_noneed,
-    save_prepare,
-    save_request,
-};
-volatile static save_process_state_t _save_nvs_flg = save_noneed;
+volatile static uint8_t _save_nvs_countdown = 0;
 
 static constexpr size_t MLX_TEMP_ARRAY_SIZE      = 16;
 static constexpr size_t MLX_FRAMEDATA_ARRAY_SIZE = 4;
@@ -210,7 +205,7 @@ static union {
 
 // Data to be sent to I2C master.
 static union {
-    uint8_t _i2c_tx_data[UNIT_REGISTER_SIZE + 8];
+    uint8_t _i2c_tx_data[UNIT_REGISTER_SIZE + 16];
     unit_thermal2_reg_t _reg_tx_data;
 };
 
@@ -292,7 +287,6 @@ static inline void gpio_lo(int_fast8_t pin) { *get_gpio_lo_reg(pin) = 1 << (pin 
 static void IRAM_ATTR i2cMasterTask(void* main_handle) {
     // initialize sensor.
     int retry = 16;
-    _i2c_in.init(0, 2, 4);
     do {
         if (retry & 1) {
             // for beta version failsafe (pin SDA SCL swapped)
@@ -407,7 +401,6 @@ static void IRAM_ATTR save_nvs(void) {
                      _i2c_ex.getI2CAddr(), new_i2c_addr);
             _reg_tx_data.config.i2c_addr     = new_i2c_addr;
             _reg_tx_data.config.i2c_addr_inv = ~new_i2c_addr;
-            _save_nvs_flg                    = save_request;
         }
     }
 
@@ -613,6 +606,7 @@ void setup(void) {
                          | 1 << GPIO_NUM_18
                          | 1 << GPIO_NUM_19
                          | 1 << GPIO_NUM_23
+                         | 1 << GPIO_NUM_25
                          | 1 << GPIO_NUM_26
                          | 1 << GPIO_NUM_27
 #if CORE_DEBUG_LEVEL == 0
@@ -622,7 +616,6 @@ void setup(void) {
                          ;
     gpio_config(&io_conf);
 
-    io_conf.intr_type    = GPIO_INTR_DISABLE;
     io_conf.pin_bit_mask = (uint64_t)1 << PIN_BUTTON;
     io_conf.mode         = GPIO_MODE_INPUT;
     gpio_config(&io_conf);
@@ -686,9 +679,10 @@ void IRAM_ATTR loop(void) {
             return;
         }
 
-        if (_save_nvs_flg == save_request) {
-            _save_nvs_flg = save_noneed;
-            save_nvs();
+        if (_save_nvs_countdown) {
+            if (--_save_nvs_countdown == 0) {
+                save_nvs();
+            }
         }
 
         // MLX90640数据
@@ -949,10 +943,6 @@ void IRAM_ATTR closeData(void) {
     _param_index      = 0;
     _param_need_count = 1;
     _param_resetindex = 0;
-
-    if (_save_nvs_flg == save_process_state_t::save_prepare) {
-        _save_nvs_flg = save_process_state_t::save_request;
-    };
 }
 
 /// I2CペリフェラルISRから1Byteずつデータを受取る処理;
@@ -971,8 +961,8 @@ bool IRAM_ATTR addData(std::uint8_t value) {
                     (value > 0x80) ? 0x80 + (value - 0x80) * 32 : value;
                 _read_reg_index = regindex;
                 if (regindex < UNIT_REGISTER_SIZE) {
-                    _i2c_ex.setTxData(&_i2c_tx_data[regindex], 8);
-                    _read_reg_index = regindex + 8;
+                    _i2c_ex.setTxData(&_i2c_tx_data[regindex], 16);
+                    _read_reg_index = regindex + 16;
                 }
                 _write_reg_index  = regindex;
                 _last_command     = CMD_REG_ACCESS;
@@ -1019,8 +1009,7 @@ bool IRAM_ATTR addData(std::uint8_t value) {
                             _i2c_tx_data[_write_reg_index] = value;
                             if (_write_reg_index <
                                 sizeof(unit_thermal2_reg_t)) {
-                                _save_nvs_flg =
-                                    save_process_state_t::save_prepare;
+                                _save_nvs_countdown = 16;
                             }
                         }
                         _reg_modified = true;

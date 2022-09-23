@@ -25,7 +25,7 @@ namespace m5 {
 // 受信FIFOバッファがこの数を上回ると割込みが発生する
 static constexpr std::uint32_t i2c_rx_fifo_full_thresh_val = 1;
 // 送信FIFOバッファがこの数を下回ると割込みが発生する
-static constexpr std::uint32_t i2c_tx_fifo_empty_thresh_val = 3;
+static constexpr std::uint32_t i2c_tx_fifo_empty_thresh_val = 8;
 // SCL立上り後のSDAサンプル時間
 static constexpr std::uint32_t i2c_slave_sda_sample_val = 4;
 // SCL立下り後のSDAホールド時間
@@ -65,62 +65,43 @@ static inline void IRAM_ATTR updateDev(i2c_dev_t* dev) {
 
 #else
 
-static inline i2c_dev_t* IRAM_ATTR getDev(i2c_port_t num) {
+static __attribute__ ((always_inline)) inline i2c_dev_t* IRAM_ATTR getDev(i2c_port_t num) {
     return num == 0 ? &I2C0 : &I2C1;
 }
-static inline std::uint32_t IRAM_ATTR getRxFifoCount(i2c_dev_t* dev) {
+static __attribute__ ((always_inline)) inline std::uint32_t IRAM_ATTR getRxFifoCount(i2c_dev_t* dev) {
     return dev->status_reg.rx_fifo_cnt;
 }
-static inline std::uint32_t IRAM_ATTR getTxFifoCount(i2c_dev_t* dev) {
+static __attribute__ ((always_inline)) inline std::uint32_t IRAM_ATTR getTxFifoCount(i2c_dev_t* dev) {
     return dev->status_reg.tx_fifo_cnt;
 }
-static inline void IRAM_ATTR updateDev(i2c_dev_t* dev) {
+static __attribute__ ((always_inline)) inline void IRAM_ATTR updateDev(i2c_dev_t* dev) {
 }
 
 #endif
 
-static inline std::uintptr_t IRAM_ATTR getFifoAddr(i2c_dev_t* dev) {
+static __attribute__ ((always_inline)) inline std::uintptr_t IRAM_ATTR getFifoAddr(i2c_dev_t* dev) {
     return (std::uintptr_t) & (dev->fifo_data);
 }
 
-static void IRAM_ATTR clear_txdata(i2c_dev_t* dev) {
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-    dev->int_ena.tx_fifo_wm = false;
-#else
-    dev->int_ena.tx_fifo_empty = false;
-#endif
+static __attribute__ ((always_inline)) inline void IRAM_ATTR clear_txdata(i2c_dev_t* dev) {
     dev->fifo_conf.tx_fifo_rst = 1;
     dev->fifo_conf.tx_fifo_rst = 0;
 }
 
-void IRAM_ATTR add_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
+void __attribute__ ((always_inline)) inline IRAM_ATTR add_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
                           std::size_t len) {
-    std::uintptr_t fifo_addr = getFifoAddr(dev);
-    for (std::size_t i = 0; i < len; ++i) {
-        WRITE_PERI_REG(fifo_addr, buf[i]);
-    }
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-    dev->int_clr.tx_fifo_wm = true;
-    dev->int_ena.tx_fifo_wm = true;
-#else
-    dev->int_clr.tx_fifo_empty = true;
-    dev->int_ena.tx_fifo_empty = true;
-#endif
+    uint32_t fifo_addr = getFifoAddr(dev);
+    do {
+        WRITE_PERI_REG(fifo_addr, *buf++);
+    } while (--len);
 }
 
-void IRAM_ATTR add_txdata(i2c_dev_t* dev, std::uint8_t buf) {
+void __attribute__ ((always_inline)) inline IRAM_ATTR add_txdata(i2c_dev_t* dev, std::uint8_t buf) {
     uint32_t fifo_addr = getFifoAddr(dev);
     WRITE_PERI_REG(fifo_addr, buf);
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-    dev->int_clr.tx_fifo_wm = true;
-    dev->int_ena.tx_fifo_wm = true;
-#else
-    dev->int_clr.tx_fifo_empty = true;
-    dev->int_ena.tx_fifo_empty = true;
-#endif
 }
 
-void IRAM_ATTR set_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
+void __attribute__ ((always_inline)) inline IRAM_ATTR set_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
                           std::size_t len) {
     dev->fifo_conf.tx_fifo_rst = 1;
     dev->fifo_conf.tx_fifo_rst = 0;
@@ -129,20 +110,13 @@ void IRAM_ATTR set_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
     do {
         WRITE_PERI_REG(fifo_addr, *buf++);
     } while (--len);
-
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-    dev->int_clr.tx_fifo_wm = true;
-    dev->int_ena.tx_fifo_wm = true;
-#else
-    dev->int_clr.tx_fifo_empty = true;
-    dev->int_ena.tx_fifo_empty = true;
-#endif
 }
 
 /// I2Cイベントハンドラ
 static void IRAM_ATTR i2c_isr_handler(void* arg) {
     auto p_i2c = (I2C_Slave*)arg;
     auto dev   = getDev(p_i2c->getI2CPort());
+    bool notify = false;
     do {
         typeof(dev->int_status) int_sts;
         int_sts.val      = dev->int_status.val;
@@ -150,29 +124,26 @@ static void IRAM_ATTR i2c_isr_handler(void* arg) {
 
         std::uint32_t rx_fifo_cnt = getRxFifoCount(dev);
         if (rx_fifo_cnt) {
-            bool notify = false;
             do {
                 if (command_processor::addData(dev->fifo_data.val)) {
                     notify = true;
                 }
             } while (--rx_fifo_cnt);
-            if (notify) {
-                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-                vTaskNotifyGiveFromISR(p_i2c->getMainTaskHandle(),
-                                    &xHigherPriorityTaskWoken);
-                portYIELD_FROM_ISR();
-            }
         }
         if (int_sts.trans_complete || int_sts.arbitration_lost) {
             // clear_txdata(dev);
             command_processor::closeData();
         }
-        // if (int_sts.tx_fifo_empty)
-        // if (int_sts.tx_fifo_wm)
-        if (getTxFifoCount(dev) < 4) {
+        while (getTxFifoCount(dev) <= i2c_tx_fifo_empty_thresh_val) {
             command_processor::prepareTxData();
         }
     } while (dev->int_status.val);
+    if (notify) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(p_i2c->getMainTaskHandle(),
+                            &xHigherPriorityTaskWoken);
+        // portYIELD_FROM_ISR();
+    }
 }
 
 /// I2C slave operation start processing.
@@ -253,6 +224,7 @@ void setupTask(void* args) {
         dev->fifo_conf.val            = fifo_conf.val;
 
         dev->int_ena.val = I2C_TRANS_COMPLETE_INT_ENA |
+                           I2C_TRANS_START_INT_ENA |
                            I2C_ARBITRATION_LOST_INT_ENA |
                            I2C_SLAVE_TRAN_COMP_INT_ENA |
                            I2C_TXFIFO_EMPTY_INT_ENA | I2C_RXFIFO_FULL_INT_ENA;
