@@ -789,7 +789,7 @@ void recvTask(void*)
   static constexpr uint8_t reg_default[] =
   {
     0, 0, 0, 0,
-    0x90, 0x64, 0x00, 0x07,
+    0x90, 0x64, 0x01, 0x00,
     0x32, (uint8_t)~0x32, // I2C_Addr
     0x04,        // function control
     0x05,        // refresh rate
