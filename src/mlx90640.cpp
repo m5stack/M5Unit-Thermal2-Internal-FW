@@ -934,11 +934,12 @@ void MLX90640_Class::setRate(refresh_rate_t rate) {
     _i2c_freq = freq;
 
     uint16_t tmp;
-    if (readReg(0x800D, &tmp, 1)) {
-        uint16_t value = (tmp & 0xFC7F) | (_refresh_rate << 7);
-        writeReg(0x800D, &value, 1);
-        writeReg(0x8000, 0x0030);
-    }
+
+    while (!readReg(0x800D, &tmp, 1)) { vTaskDelay(1); }
+
+    uint16_t value = (tmp & 0xFC7F) | (_refresh_rate << 7);
+    writeReg(0x800D, &value, 1);
+    writeReg(0x8000, 0x0030);
 }
 
 bool MLX90640_Class::readFrameData(uint16_t *data) {

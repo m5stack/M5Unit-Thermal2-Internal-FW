@@ -11,10 +11,10 @@ struct unit_thermal2_reg_t {
         uint8_t r;
         uint8_t g;
         uint8_t b;
-        bool operator==(const rgb_t& rhs) {
+        inline bool operator==(const rgb_t& rhs) {
             return r == rhs.r && g == rhs.g && b == rhs.b;
         }
-        bool operator!=(const rgb_t& rhs) {
+        inline bool operator!=(const rgb_t& rhs) {
             return !(*this == rhs);
         }
     };
@@ -61,6 +61,13 @@ struct unit_thermal2_reg_t {
         uint16_t buzzer_freq;
         uint8_t buzzer_volume;
         rgb_t led;
+
+        inline bool operator==(const config_reg_t& rhs) {
+            return memcmp(this, &rhs, sizeof(config_reg_t)) == 0;
+        }
+        inline bool operator!=(const config_reg_t& rhs) {
+            return !(*this == rhs);
+        }
     };
 
     // 0x00 ~ 0x07

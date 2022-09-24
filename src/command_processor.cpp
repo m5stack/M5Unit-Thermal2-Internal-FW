@@ -252,7 +252,7 @@ static constexpr uint8_t DRAM_ATTR
 };
 static constexpr uint8_t DRAM_ATTR
     REGISTER_DIRECT_WRITE_MAP[(REGISTER_WRITABLE_MAP_SIZE + 7) >> 3] = {
-        0x00, 0xF8,  // 0x00 - 0x0F
+        0x00, 0xD8,  // 0x00 - 0x0F
         0xFF, 0x00,  // 0x10 - 0x1F
         0xFF, 0x00,  // 0x20 - 0x2F
         0xFF, 0x00,  // 0x30 - 0x3F
@@ -328,14 +328,16 @@ static void setBuzzer(uint32_t freq, uint32_t volume) {
 static void IRAM_ATTR i2cMasterTask(void* main_handle) {
     // initialize sensor.
     int retry = 16;
+    _led.init(PIN_RGB_LED);
+    _led.setColor(0, 2, 0);
     do {
         if (retry & 1) {
             // for beta version failsafe (pin SDA SCL swapped)
-            if (!_i2c_in.init(0, PIN_IN_SCL, PIN_IN_SDA)) {
+            if (!_i2c_in.init(I2C_NUM_0, PIN_IN_SCL, PIN_IN_SDA)) {
                 ESP_LOGE(LOGNAME, "I2C In init failure.");
                 esp_restart();
             }
-        } else if (!_i2c_in.init(0, PIN_IN_SDA, PIN_IN_SCL)) {
+        } else if (!_i2c_in.init(I2C_NUM_0, PIN_IN_SDA, PIN_IN_SCL)) {
             ESP_LOGE(LOGNAME, "I2C In init failure.");
             esp_restart();
         }
@@ -344,13 +346,13 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
                                     7 & _reg_tx_data.config.refresh_rate))) {
             break;
         }
-        _led.setColor(4, 0, 4);
+        _led.setColor(2, 0, 2);
         _i2c_in.stop();
     } while (--retry);
 
     if (retry == 0) {
         ESP_LOGE(LOGNAME, "MLX90640 init failure.");
-        _led.setColor(4, 4, 0);
+        _led.setColor(2, 2, 0);
         {
             gpio_config_t io_conf;
             io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -372,7 +374,7 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
                 gpio_hi(PIN_IN_SDA);
             }
         }
-        // esp_restart();
+        esp_restart();
     }
 
     // running...
@@ -394,13 +396,11 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
         int idx   = (_idx_framedata + 1) & (MLX_FRAMEDATA_ARRAY_SIZE - 1);
         bool recv = _mlx.readFrameData(_mlx_framedatas[idx]);
         xSemaphoreGive(_flash_locker);
-        // _recv_lock = false;
         if (recv) {
             if (discard_count) {
                 --discard_count;
             } else {
                 _idx_framedata = idx;
-                // ++count_framedata;
                 xTaskNotifyGive(main_handle);
             }
         } else {
@@ -558,13 +558,6 @@ static bool IRAM_ATTR command(void) {
     }
     const std::uint8_t* params = _rx_buffer[_rx_buffer_getpos];
 
-#if DEBUG == 1
-    if (cmd_detect[params[0]] == 0) {
-        cmd_detect[params[0]] = 1;
-        ESP_LOGI(LOGNAME, "CMD:%02x", params[0]);
-    }
-#endif
-
     switch (params[0]) {
         default:
             ESP_LOGI(LOGNAME, "unknown CMD:%02x", params[0]);
@@ -626,7 +619,29 @@ static bool IRAM_ATTR command(void) {
 void setup(void) {
     rtc_clk_cpu_freq_mhz_to_config(160, &_cpu_freq_conf_160);
     rtc_clk_cpu_freq_mhz_to_config(80, &_cpu_freq_conf_80);
+
+    _flash_locker = xSemaphoreCreateMutex();
+    load_nvs();
+
     rtc_clk_cpu_freq_set_config_fast(&_cpu_freq_conf_80);
+
+    xTaskCreatePinnedToCore(i2cMasterTask, "i2cMasterTask", 8192,
+                            xTaskGetCurrentTaskHandle(), 1, nullptr,
+                            PRO_CPU_NUM);
+
+    for (int i = 0; i < 4; ++i) {
+        _mlx_framedatas[i] = (uint16_t*)heap_caps_malloc(
+            m5::MLX90640_Class::FRAME_DATA_BYTES, MALLOC_CAP_DMA);
+        memset(_mlx_framedatas[i], 0x2C, m5::MLX90640_Class::FRAME_DATA_BYTES);
+    }
+    for (int i = 0; i < MLX_TEMP_ARRAY_SIZE; ++i) {
+        _mlx_tempdatas[i] = (m5::MLX90640_Class::temp_data_t*)heap_caps_malloc(
+            sizeof(m5::MLX90640_Class::temp_data_t), MALLOC_CAP_DMA);
+        memset(_mlx_tempdatas[i], 0, sizeof(m5::MLX90640_Class::temp_data_t));
+    }
+    _diff_data = (int16_t*)heap_caps_malloc(m5::MLX90640_Class::TEMP_DATA_BYTES,
+                                            MALLOC_CAP_DMA);
+    memset(_diff_data, 0, m5::MLX90640_Class::TEMP_DATA_BYTES);
 
     gpio_config_t io_conf;
     io_conf.mode         = GPIO_MODE_DISABLE;
@@ -638,7 +653,7 @@ void setup(void) {
         1 << GPIO_NUM_9 | 1 << GPIO_NUM_10 | 1 << GPIO_NUM_12 |
         1 << GPIO_NUM_13 | 1 << GPIO_NUM_14 | 1 << GPIO_NUM_15 |
         1 << GPIO_NUM_18 | 1 << GPIO_NUM_19 | 1 << GPIO_NUM_23 |
-        1 << GPIO_NUM_25 | 1 << GPIO_NUM_26 | 1 << GPIO_NUM_27
+        1 << GPIO_NUM_25 | 1 << GPIO_NUM_26
 #if CORE_DEBUG_LEVEL == 0
         | 1 << GPIO_NUM_1 | 1 << GPIO_NUM_3
 #endif
@@ -649,48 +664,24 @@ void setup(void) {
     io_conf.mode         = GPIO_MODE_INPUT;
     gpio_config(&io_conf);
 
-    _led.init(PIN_RGB_LED);
-    _led.setColor(0, 2, 0);
-
     // buzzer start beep
     ledcAttachPin(PIN_BUZZER, BUZZER_LEDC_CHAN);
-    ledcSetup(BUZZER_LEDC_CHAN, 5000, 12);  // freq and bit_num.
+    ledcSetup(BUZZER_LEDC_CHAN, 1, 12);  // freq and bit_num.
     setBuzzer(0, 0);
-
-    _flash_locker = xSemaphoreCreateMutex();
-
-    load_nvs();
-
-    xTaskCreatePinnedToCore(i2cMasterTask, "i2cMasterTask", 8192,
-                            xTaskGetCurrentTaskHandle(), 1, nullptr,
-                            PRO_CPU_NUM);
-
-    _diff_data = (int16_t*)heap_caps_malloc(m5::MLX90640_Class::TEMP_DATA_BYTES,
-                                            MALLOC_CAP_DMA);
-
-    memset(_diff_data, 0, m5::MLX90640_Class::TEMP_DATA_BYTES);
-    for (int i = 0; i < 4; ++i) {
-        _mlx_framedatas[i] = (uint16_t*)heap_caps_malloc(
-            m5::MLX90640_Class::FRAME_DATA_BYTES, MALLOC_CAP_DMA);
-        memset(_mlx_framedatas[i], 0x2C, m5::MLX90640_Class::FRAME_DATA_BYTES);
-    }
-    for (int i = 0; i < MLX_TEMP_ARRAY_SIZE; ++i) {
-        _mlx_tempdatas[i] = (m5::MLX90640_Class::temp_data_t*)heap_caps_malloc(
-            sizeof(m5::MLX90640_Class::temp_data_t), MALLOC_CAP_DMA);
-        memset(_mlx_tempdatas[i], 0, sizeof(m5::MLX90640_Class::temp_data_t));
-    }
 
     ESP_LOGI(LOGNAME, "I2C_SLAVE init: addr=0x%02x",
              _reg_tx_data.config.i2c_addr);
-    _i2c_ex.init(1, PIN_EX_SDA, PIN_EX_SCL, _reg_tx_data.config.i2c_addr);
-    _led.setColor(0x010101);
+    _i2c_ex.init(I2C_NUM_1, PIN_EX_SDA, PIN_EX_SCL,
+                 _reg_tx_data.config.i2c_addr);
 
     TaskHandle_t idle = xTaskGetIdleTaskHandleForCPU(PRO_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
     idle = xTaskGetIdleTaskHandleForCPU(APP_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
 
-    vTaskDelay(64);
+    do {
+        vTaskDelay(1);
+    } while (_idx_framedata == -1);
 
     _led.setColor(0);
 }
@@ -839,8 +830,17 @@ void IRAM_ATTR loop(void) {
     auto msec = millis();
 
     if (_temp_data) {
-        if (reg_mod && _current_alarm_state == alarm_none) {
-            _current_alarm_state = alarm_change_setting;
+        if (reg_mod) {
+            if (_reg_tx_data.config.function_ctrl !=
+                _reg_rx_data.config.function_ctrl) {
+                _alarm_last_time = msec + _alarm_interval + 1;
+                if (_save_nvs_countdown == 0) {
+                    _save_nvs_countdown = 16;
+                }
+            }
+            if (_current_alarm_state == alarm_none) {
+                _current_alarm_state = alarm_change_setting;
+            }
         }
         // temperature alarm check.
         if (((msec - _alarm_last_time) > _alarm_interval)) {
