@@ -108,10 +108,10 @@ bool update(void)
     }
     Serial.println("ok");
     /// ビジーチェック
-    int retry = 100;
+    int retry = 1024;
     do
     {
-      delay(50);
+      delay(4);
       readbuf[0] = UPDATE_RESULT_BUSY;
       if (!M5.Ex_I2C.start(I2C_ADDR, true, 400000)
        || !M5.Ex_I2C.read(readbuf, 1)

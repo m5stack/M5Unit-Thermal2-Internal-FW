@@ -789,7 +789,8 @@ void recvTask(void*)
   static constexpr uint8_t reg_default[] =
   {
     0, 0, 0, 0,
-    0x90, 0x64, 0x01, 0x00,
+    0x90, 0x64, // DEVICE_ID
+    0x01, 0x01, // FIRMWARE_VERSION
     0x32, (uint8_t)~0x32, // I2C_Addr
     0x04,        // function control
     0x05,        // refresh rate
@@ -925,7 +926,7 @@ void recvTask(void*)
         uint_fast16_t freq = 4000 + (s * 200);
         reg_0x12[0] = (uint8_t)freq;
         reg_0x12[1] = (uint8_t)(freq >> 8);
-        reg_0x12[2] = 128;
+        reg_0x12[2] = 0;
         if (s == 10) {
           step_counter = 0;
           check_list[check_list_t::buzzer_led] = check_state_t::success;
@@ -958,6 +959,10 @@ void recvTask(void*)
           }
         }
         M5.Ex_I2C.writeRegister(i2c_addr, 0x12, reg_0x12, sizeof(reg_0x12), freq_i2c_default);
+      }
+      else {
+        uint8_t reg_0x14 = ((step_counter-1) & 63) * 4;
+        M5.Ex_I2C.writeRegister8(i2c_addr, 0x14, reg_0x14, freq_i2c_default);
       }
       break;
 

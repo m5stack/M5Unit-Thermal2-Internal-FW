@@ -52,20 +52,20 @@
 //                       [0] Low  temp reached low threshold
 
 // index : 0x12 - 0x13 = buzzer freq. 0~65535 (little endian)
-// index : 0x14        = buzzer duty. 0~255
+// index : 0x14        = buzzer volume. 0~255
 // index : 0x15 - 0x17 = Neopixel Color (R G B)
 // index : 0x18 - 0x1F = reserved
 
 // index : 0x20 - 0x21 = alarm threshold of lowest temperature.
 // index : 0x22 - 0x24 = Low temperature alarm neopixel color. (R G B)
 // index : 0x25        = Low temperature alarm buzzer interval x 10ms
-// index : 0x26 - 0x27 = Low temperature alarm buzzer frequency. 0 ~ 65535(depends on buzzer duty setting) (little endian)
+// index : 0x26 - 0x27 = Low temperature alarm buzzer frequency. 0 ~ 65535(depends on buzzer volume setting) (little endian)
 // index : 0x28 - 0x2F = reserved
 
 // index : 0x30 - 0x31 = alarm threshold of highest temperature. value = (℃+64)*128 (little endian)
 // index : 0x32 - 0x34 = High temperature alarm neopixel color. (R G B)
 // index : 0x35        = High temperature alarm buzzer interval x 10ms
-// index : 0x36 - 0x37 = High temperature alarm buzzer frequency. 0 ~ 65535(depends on buzzer duty setting) (little endian)
+// index : 0x36 - 0x37 = High temperature alarm buzzer frequency. 0 ~ 65535(depends on buzzer volume setting) (little endian)
 // index : 0x38 - 0x3F = reserved
 
 // index : 0x40 - 0x6D = reserved
@@ -84,8 +84,33 @@
 // index : 0x7C - 0x7D = Highest temperature (little endian)
 // index : 0x7E        = Highest x position
 // index : 0x7F        = Highest y position
-// index : 0x80 -0x37F = Temperature data array (16x24 word) (little endian)
 
+// index : 0x80 - 0x97 = Temperature data array (16x24 = 384 word) (little endian)
+//                       ※ One register number contains 16 word (32 bytes) of data.
+// index : 0x80        = X0~15,Y0 Temperature data array (16 word) (little endian)
+// index : 0x81        = X0~15,Y1 Temperature data array (16 word) (little endian)
+// index : 0x82        = X0~15,Y2 Temperature data array (16 word) (little endian)
+//   ～～～～～～～～～～～～～～～
+// index : 0x95        = X0~15,Y21 Temperature data array (16 word) (little endian)
+// index : 0x96        = X0~15,Y22 Temperature data array (16 word) (little endian)
+// index : 0x97        = X0~15,Y23 Temperature data array (16 word) (little endian)
+
+/*
+The resolution of the camera is 32x24, but the data obtained at one time is half of that.
+The resulting Temperature data array is stored alternately like a chessboard.
+You can use reg 0x6F `subpage information` to find out whether even or odd numbers were obtained
+
+■ == subpage 0
+□ == subpage 1
+         : 　０ １ ２ ３ … 28 29 30 31
+reg 0x80 : ０■ □ ■ □ … ■ □ ■ □
+reg 0x81 : １□ ■ □ ■ … □ ■ □ ■
+reg 0x82 : ２■ □ ■ □ … ■ □ ■ □
+           ～～～～～～～～～～～
+reg 0x95 : 21□ ■ □ ■ … □ ■ □ ■
+reg 0x96 : 22■ □ ■ □ … ■ □ ■ □
+reg 0x97 : 23□ ■ □ ■ … □ ■ □ ■
+*/
 
 // ※ Temperature value conversion formula:  (°C + 64) * 128 = value.
 // e.g.
@@ -284,6 +309,22 @@ static inline void gpio_hi(int_fast8_t pin) { *get_gpio_hi_reg(pin) = 1 << (pin 
 static inline void gpio_lo(int_fast8_t pin) { *get_gpio_lo_reg(pin) = 1 << (pin & 31); }
 /* clang-format on */
 
+static void setBuzzer(uint32_t freq, uint32_t volume) {
+    static uint32_t prev_freq = ~0u;
+    if (freq && volume) {
+        if (prev_freq != freq) {
+            prev_freq = freq;
+            ledcWriteTone(BUZZER_LEDC_CHAN, freq);
+        }
+        ++volume;
+        ledcWrite(BUZZER_LEDC_CHAN, (volume * volume) >> 7);
+        *(uint32_t*)GPIO_FUNC25_OUT_SEL_CFG_REG = 0x48;
+    } else {
+        *(uint32_t*)GPIO_FUNC25_OUT_SEL_CFG_REG = 0x100;
+        ledcWrite(BUZZER_LEDC_CHAN, 0);
+    }
+}
+
 static void IRAM_ATTR i2cMasterTask(void* main_handle) {
     // initialize sensor.
     int retry = 16;
@@ -442,7 +483,7 @@ static void IRAM_ATTR load_nvs(void) {
     _reg_rx_data.config.function_ctrl     = 4;
     _reg_rx_data.config.refresh_rate      = _reg_rx_data.rate_16Hz;
     _reg_rx_data.config.noise_filter      = 4;
-    _reg_rx_data.config.buzzer_duty       = 128;
+    _reg_rx_data.config.buzzer_volume     = 128;
     _reg_rx_data.config.buzzer_freq       = 4800;
     _reg_rx_data.config.temp_alarm_area   = 0xFF;
     _reg_rx_data.config.temp_alarm_enable = 0;
@@ -531,19 +572,18 @@ static bool IRAM_ATTR command(void) {
 
         case CMD_UPDATE_BEGIN:
             update::initCRCtable();
-            ledcWrite(BUZZER_LEDC_CHAN, 128);
             break;
 
         case CMD_UPDATE_DATA:
             _firmupdate_result = UPDATE_RESULT_BUSY;
             ESP_EARLY_LOGI(LOGNAME, "flash:%d", _firmupdate_index);
             {
-                ledcWriteTone(BUZZER_LEDC_CHAN, 0);
+                setBuzzer(440, 32);
                 _led.setColor(0, 0, 0);
                 xSemaphoreTake(_flash_locker, portMAX_DELAY);
                 bool result = update::writeBuffer(_firmupdate_index);
                 xSemaphoreGive(_flash_locker);
-                ledcWriteTone(BUZZER_LEDC_CHAN, 4000);
+                setBuzzer(0, 0);
                 if (!result) {
                     ESP_EARLY_LOGE(LOGNAME, "OTA write fail");
                     _firmupdate_result = UPDATE_RESULT_ERROR;
@@ -560,17 +600,17 @@ static bool IRAM_ATTR command(void) {
             break;
 
         case CMD_UPDATE_END:
-            ledcWriteTone(BUZZER_LEDC_CHAN, 0);
+            setBuzzer(0, 0);
             if (update::end()) {
                 ESP_EARLY_LOGI(LOGNAME, "success! rebooting...");
                 for (int i = 0; i < 8; ++i) {
-                    ledcWriteTone(BUZZER_LEDC_CHAN,
-                                  3600 + (200 << (2 + (i & 3))));
+                    setBuzzer(440 + (55 << (i & 3)), 32);
+
                     _led.setColor((i & 4) >> 1, (i & 2), (i & 1) << 1);
-                    vTaskDelay(100);
+                    vTaskDelay(128);
                 }
                 _led.setColor(0, 0, 0);
-                ledcWriteTone(BUZZER_LEDC_CHAN, 0);
+                setBuzzer(0, 0);
                 esp_restart();
             } else {
                 _led.setColor(2, 0, 2);
@@ -593,27 +633,16 @@ void setup(void) {
     io_conf.intr_type    = GPIO_INTR_DISABLE;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
-    io_conf.pin_bit_mask = 1 << GPIO_NUM_0
-                         | 1 << GPIO_NUM_2
-                         | 1 << GPIO_NUM_4
-                         | 1 << GPIO_NUM_5
-                         | 1 << GPIO_NUM_9
-                         | 1 << GPIO_NUM_10
-                         | 1 << GPIO_NUM_12
-                         | 1 << GPIO_NUM_13
-                         | 1 << GPIO_NUM_14
-                         | 1 << GPIO_NUM_15
-                         | 1 << GPIO_NUM_18
-                         | 1 << GPIO_NUM_19
-                         | 1 << GPIO_NUM_23
-                         | 1 << GPIO_NUM_25
-                         | 1 << GPIO_NUM_26
-                         | 1 << GPIO_NUM_27
+    io_conf.pin_bit_mask =
+        1 << GPIO_NUM_0 | 1 << GPIO_NUM_2 | 1 << GPIO_NUM_4 | 1 << GPIO_NUM_5 |
+        1 << GPIO_NUM_9 | 1 << GPIO_NUM_10 | 1 << GPIO_NUM_12 |
+        1 << GPIO_NUM_13 | 1 << GPIO_NUM_14 | 1 << GPIO_NUM_15 |
+        1 << GPIO_NUM_18 | 1 << GPIO_NUM_19 | 1 << GPIO_NUM_23 |
+        1 << GPIO_NUM_25 | 1 << GPIO_NUM_26 | 1 << GPIO_NUM_27
 #if CORE_DEBUG_LEVEL == 0
-                         | 1 << GPIO_NUM_1
-                         | 1 << GPIO_NUM_3
+        | 1 << GPIO_NUM_1 | 1 << GPIO_NUM_3
 #endif
-                         ;
+        ;
     gpio_config(&io_conf);
 
     io_conf.pin_bit_mask = (uint64_t)1 << PIN_BUTTON;
@@ -625,7 +654,8 @@ void setup(void) {
 
     // buzzer start beep
     ledcAttachPin(PIN_BUZZER, BUZZER_LEDC_CHAN);
-    ledcSetup(BUZZER_LEDC_CHAN, 5000, 8);  // freq and bit_num.
+    ledcSetup(BUZZER_LEDC_CHAN, 5000, 12);  // freq and bit_num.
+    setBuzzer(0, 0);
 
     _flash_locker = xSemaphoreCreateMutex();
 
@@ -653,8 +683,7 @@ void setup(void) {
     ESP_LOGI(LOGNAME, "I2C_SLAVE init: addr=0x%02x",
              _reg_tx_data.config.i2c_addr);
     _i2c_ex.init(1, PIN_EX_SDA, PIN_EX_SCL, _reg_tx_data.config.i2c_addr);
-    _led.setColor(0x1F0000);
-
+    _led.setColor(0x010101);
 
     TaskHandle_t idle = xTaskGetIdleTaskHandleForCPU(PRO_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
@@ -863,9 +892,9 @@ void IRAM_ATTR loop(void) {
             _reg_tx_data.status.temp_alarm = alarm;
 
             if (_current_alarm_state != alarm_state) {
-                _current_alarm_state = alarm_state;
-                uint8_t buzzer_duty  = 0;
-                uint16_t buzzer_freq = 0;
+                _current_alarm_state  = alarm_state;
+                uint16_t buzzer_freq  = 0;
+                uint8_t buzzer_volume = 0;
 
                 unit_thermal2_reg_t::rgb_t led          = {0, 0, 0};
                 unit_thermal2_reg_t::alarm_reg_t* alarm = nullptr;
@@ -873,8 +902,8 @@ void IRAM_ATTR loop(void) {
                     default:
 
                         if (getbit(_reg_rx_data.config.function_ctrl, 0)) {
-                            buzzer_duty = _reg_rx_data.config.buzzer_duty;
-                            buzzer_freq = _reg_rx_data.config.buzzer_freq;
+                            buzzer_freq   = _reg_rx_data.config.buzzer_freq;
+                            buzzer_volume = _reg_rx_data.config.buzzer_volume;
                         }
                         if (getbit(_reg_rx_data.config.function_ctrl, 1)) {
                             led = _reg_rx_data.config.led;
@@ -898,11 +927,10 @@ void IRAM_ATTR loop(void) {
 
                     led = alarm->led;
 
-                    buzzer_freq = alarm->buzzer_freq;
-                    buzzer_duty = _reg_rx_data.config.buzzer_duty;
+                    buzzer_freq   = alarm->buzzer_freq;
+                    buzzer_volume = _reg_rx_data.config.buzzer_volume;
                 }
-                ledcWrite(BUZZER_LEDC_CHAN, buzzer_duty);
-                ledcWriteTone(BUZZER_LEDC_CHAN, buzzer_freq);
+                setBuzzer(buzzer_freq, buzzer_volume);
                 _led.setColor(led.r, led.g, led.b);
             }
         }
@@ -1059,8 +1087,7 @@ bool IRAM_ATTR addData(std::uint8_t value) {
                                        "CMD_UPDATE_DATA:checkCRC32:false");
                         _firmupdate_result = UPDATE_RESULT_BROKEN;
                     }
-                    _i2c_ex.clearTxData();
-                    prepareTxData();
+                    _i2c_ex.setTxData(_firmupdate_result, 9);
                     _firmupdate_state = sector_write;
                     closeData();
                 } else if ((_params[1] == DEVICE_ID_0) &&
@@ -1118,7 +1145,7 @@ void IRAM_ATTR prepareTxData(void) {
 
         case CMD_UPDATE_BEGIN:
         case CMD_UPDATE_DATA:
-            _i2c_ex.addTxData(_firmupdate_result);
+            _i2c_ex.setTxData(_firmupdate_result, 9);
             break;
 
         default:

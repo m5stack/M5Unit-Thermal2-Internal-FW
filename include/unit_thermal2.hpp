@@ -59,7 +59,7 @@ struct unit_thermal2_reg_t {
         uint8_t temp_alarm_area;
         uint8_t temp_alarm_enable;
         uint16_t buzzer_freq;
-        uint8_t buzzer_duty;
+        uint8_t buzzer_volume;
         rgb_t led;
     };
 

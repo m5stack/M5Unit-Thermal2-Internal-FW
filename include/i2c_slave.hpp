@@ -28,20 +28,21 @@ class I2C_Slave {
     void addTxData(const std::uint8_t* buf, std::size_t len);
     void addTxData(std::uint8_t buf);
     void setTxData(const std::uint8_t* buf, std::size_t len);
+    void setTxData(std::uint8_t buf, std::size_t len);
 
-    __attribute__ ((always_inline)) inline i2c_port_t getI2CPort(void) const {
+    __attribute__((always_inline)) inline i2c_port_t getI2CPort(void) const {
         return _i2c_port;
     }
-    __attribute__ ((always_inline)) inline int getI2CAddr(void) const {
+    __attribute__((always_inline)) inline int getI2CAddr(void) const {
         return _i2c_addr;
     }
-    __attribute__ ((always_inline)) inline int getPinSDA(void) const {
+    __attribute__((always_inline)) inline int getPinSDA(void) const {
         return _pin_sda;
     }
-    __attribute__ ((always_inline)) inline int getPinSCL(void) const {
+    __attribute__((always_inline)) inline int getPinSCL(void) const {
         return _pin_scl;
     }
-     __attribute__ ((always_inline)) inline void* getMainTaskHandle(void) const {
+    __attribute__((always_inline)) inline void* getMainTaskHandle(void) const {
         return _mainTaskHandle;
     }
 

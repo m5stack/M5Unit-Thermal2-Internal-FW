@@ -2,7 +2,6 @@
 //! Licensed under the MIT license.
 //! See LICENSE file in the project root for full license information.
 
-
 #include "i2c_slave.hpp"
 #include "command_processor.hpp"
 
@@ -65,57 +64,75 @@ static inline void IRAM_ATTR updateDev(i2c_dev_t* dev) {
 
 #else
 
-static __attribute__ ((always_inline)) inline i2c_dev_t* IRAM_ATTR getDev(i2c_port_t num) {
+static __attribute__((always_inline)) inline i2c_dev_t* IRAM_ATTR
+getDev(i2c_port_t num) {
     return num == 0 ? &I2C0 : &I2C1;
 }
-static __attribute__ ((always_inline)) inline std::uint32_t IRAM_ATTR getRxFifoCount(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline std::uint32_t IRAM_ATTR
+getRxFifoCount(i2c_dev_t* dev) {
     return dev->status_reg.rx_fifo_cnt;
 }
-static __attribute__ ((always_inline)) inline std::uint32_t IRAM_ATTR getTxFifoCount(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline std::uint32_t IRAM_ATTR
+getTxFifoCount(i2c_dev_t* dev) {
     return dev->status_reg.tx_fifo_cnt;
 }
-static __attribute__ ((always_inline)) inline void IRAM_ATTR updateDev(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline void IRAM_ATTR
+updateDev(i2c_dev_t* dev) {
 }
 
 #endif
 
-static __attribute__ ((always_inline)) inline std::uintptr_t IRAM_ATTR getFifoAddr(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline std::uintptr_t IRAM_ATTR
+getFifoAddr(i2c_dev_t* dev) {
     return (std::uintptr_t) & (dev->fifo_data);
 }
 
-static __attribute__ ((always_inline)) inline void IRAM_ATTR clear_txdata(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline void IRAM_ATTR
+clear_txdata(i2c_dev_t* dev) {
     dev->fifo_conf.tx_fifo_rst = 1;
     dev->fifo_conf.tx_fifo_rst = 0;
 }
 
-void __attribute__ ((always_inline)) inline IRAM_ATTR add_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
-                          std::size_t len) {
+void __attribute__((always_inline)) inline IRAM_ATTR add_txdata(
+    i2c_dev_t* dev, const std::uint8_t* buf, std::size_t len) {
     uint32_t fifo_addr = getFifoAddr(dev);
     do {
         WRITE_PERI_REG(fifo_addr, *buf++);
     } while (--len);
 }
 
-void __attribute__ ((always_inline)) inline IRAM_ATTR add_txdata(i2c_dev_t* dev, std::uint8_t buf) {
+void __attribute__((always_inline)) inline IRAM_ATTR add_txdata(
+    i2c_dev_t* dev, std::uint8_t buf) {
     uint32_t fifo_addr = getFifoAddr(dev);
     WRITE_PERI_REG(fifo_addr, buf);
 }
 
-void __attribute__ ((always_inline)) inline IRAM_ATTR set_txdata(i2c_dev_t* dev, const std::uint8_t* buf,
-                          std::size_t len) {
+void __attribute__((always_inline)) inline IRAM_ATTR set_txdata(
+    i2c_dev_t* dev, const std::uint8_t* buf, std::size_t len) {
     dev->fifo_conf.tx_fifo_rst = 1;
     dev->fifo_conf.tx_fifo_rst = 0;
 
     uint32_t fifo_addr = getFifoAddr(dev);
     do {
         WRITE_PERI_REG(fifo_addr, *buf++);
+    } while (--len);
+}
+
+void __attribute__((always_inline)) inline IRAM_ATTR set_txdata(
+    i2c_dev_t* dev, std::uint8_t buf, std::size_t len) {
+    dev->fifo_conf.tx_fifo_rst = 1;
+    dev->fifo_conf.tx_fifo_rst = 0;
+
+    uint32_t fifo_addr = getFifoAddr(dev);
+    do {
+        WRITE_PERI_REG(fifo_addr, buf);
     } while (--len);
 }
 
 /// I2Cイベントハンドラ
 static void IRAM_ATTR i2c_isr_handler(void* arg) {
-    auto p_i2c = (I2C_Slave*)arg;
-    auto dev   = getDev(p_i2c->getI2CPort());
+    auto p_i2c  = (I2C_Slave*)arg;
+    auto dev    = getDev(p_i2c->getI2CPort());
     bool notify = false;
     do {
         typeof(dev->int_status) int_sts;
@@ -131,7 +148,6 @@ static void IRAM_ATTR i2c_isr_handler(void* arg) {
             } while (--rx_fifo_cnt);
         }
         if (int_sts.trans_complete || int_sts.arbitration_lost) {
-            // clear_txdata(dev);
             command_processor::closeData();
         }
         while (getTxFifoCount(dev) <= i2c_tx_fifo_empty_thresh_val) {
@@ -139,9 +155,10 @@ static void IRAM_ATTR i2c_isr_handler(void* arg) {
         }
     } while (dev->int_status.val);
     if (notify) {
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        BaseType_t xHigherPriorityTaskWoken = pdTRUE;
         vTaskNotifyGiveFromISR(p_i2c->getMainTaskHandle(),
-                            &xHigherPriorityTaskWoken);
+                               &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR();
     }
 }
 
@@ -222,11 +239,10 @@ void setupTask(void* args) {
         fifo_conf.tx_fifo_empty_thrhd = i2c_tx_fifo_empty_thresh_val;
         dev->fifo_conf.val            = fifo_conf.val;
 
-        dev->int_ena.val = I2C_TRANS_COMPLETE_INT_ENA |
-                           I2C_TRANS_START_INT_ENA |
-                           I2C_ARBITRATION_LOST_INT_ENA |
-                           I2C_SLAVE_TRAN_COMP_INT_ENA |
-                           I2C_TXFIFO_EMPTY_INT_ENA | I2C_RXFIFO_FULL_INT_ENA;
+        dev->int_ena.val =
+            I2C_TRANS_COMPLETE_INT_ENA | I2C_TRANS_START_INT_ENA |
+            I2C_ARBITRATION_LOST_INT_ENA | I2C_SLAVE_TRAN_COMP_INT_ENA |
+            I2C_TXFIFO_EMPTY_INT_ENA | I2C_RXFIFO_FULL_INT_ENA;
 
 #endif
 
@@ -265,6 +281,10 @@ void IRAM_ATTR I2C_Slave::addTxData(std::uint8_t buf) {
 }
 
 void IRAM_ATTR I2C_Slave::setTxData(const std::uint8_t* buf, std::size_t len) {
+    set_txdata(getDev(_i2c_port), buf, len);
+}
+
+void IRAM_ATTR I2C_Slave::setTxData(std::uint8_t buf, std::size_t len) {
     set_txdata(getDev(_i2c_port), buf, len);
 }
 
