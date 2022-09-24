@@ -907,16 +907,12 @@ bool MLX90640_Class::writeReg(uint16_t reg, uint16_t value) {
     return writeReg(reg, &value, 1);
 }
 
-bool MLX90640_Class::init(I2C_Master *i2c, refresh_rate_t rate) {
+bool MLX90640_Class::init(I2C_Master *i2c) {
     _i2c = i2c;
-
-    setRate(rate);
 
     uint16_t data[1024];
     if (readReg(0x2400, data, 832)) {
         MLX90640_params.setParam(data);
-
-        writeReg(0x8000, 0x0030);
         return true;
     }
     return false;
@@ -928,8 +924,8 @@ void MLX90640_Class::setRate(refresh_rate_t rate) {
     // If the refresh rate is 32 Hz or higher, the communication speed is
     // increased because I2C 400 kHz cannot meet the refresh cycle.
     uint32_t freq = 9600u << r;
-    if (freq < 400000) {
-        freq = 400000;
+    if (freq < 800000) {
+        freq = 800000;
     }
     _i2c_freq = freq;
 

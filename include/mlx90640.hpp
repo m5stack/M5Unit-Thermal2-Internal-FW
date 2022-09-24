@@ -55,7 +55,7 @@ class MLX90640_Class {
     };
 #pragma pack(pop)
 
-    bool init(I2C_Master* i2c, refresh_rate_t rate);
+    bool init(I2C_Master* i2c);
     void setRate(refresh_rate_t rate);
     inline refresh_rate_t getRate(void) const {
         return _refresh_rate;
@@ -79,7 +79,7 @@ class MLX90640_Class {
    private:
     I2C_Master* _i2c;
     refresh_rate_t _refresh_rate = (refresh_rate_t)-1;
-    uint32_t _i2c_freq           = 400000;
+    uint32_t _i2c_freq           = 800000;
     uint8_t _i2c_addr            = 0x33;
 };
 }  // namespace m5

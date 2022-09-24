@@ -124,7 +124,6 @@ reg 0x97 : 23□ ■ □ ■ … □ ■ □ ■
 
 #include "command_processor.hpp"
 
-#include <Arduino.h>
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -138,10 +137,10 @@ static rtc_cpu_freq_config_t _cpu_freq_conf_80;
 #include <esp32-hal-ledc.h>
 #include <nvs_flash.h>
 
-// #include <mutex>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <algorithm>
 
 #include "spi_neopixel.hpp"
 #include "i2c_master.hpp"
@@ -325,12 +324,17 @@ static void setBuzzer(uint32_t freq, uint32_t volume) {
     }
 }
 
-static void IRAM_ATTR i2cMasterTask(void* main_handle) {
+static void IRAM_ATTR core0Task(void* main_handle) {
     // initialize sensor.
+    _i2c_in.init(I2C_NUM_0, PIN_IN_SDA, PIN_IN_SCL);
     int retry = 16;
     _led.init(PIN_RGB_LED);
     _led.setColor(0, 2, 0);
-    do {
+
+    while (!_mlx.init(&_i2c_in) && --retry) {
+        _led.setColor(2, 0, 2);
+        _i2c_in.stop();
+
         if (retry & 1) {
             // for beta version failsafe (pin SDA SCL swapped)
             if (!_i2c_in.init(I2C_NUM_0, PIN_IN_SCL, PIN_IN_SDA)) {
@@ -341,14 +345,7 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
             ESP_LOGE(LOGNAME, "I2C In init failure.");
             esp_restart();
         }
-
-        if (_mlx.init(&_i2c_in, (m5::MLX90640_Class::refresh_rate_t)(
-                                    7 & _reg_tx_data.config.refresh_rate))) {
-            break;
-        }
-        _led.setColor(2, 0, 2);
-        _i2c_in.stop();
-    } while (--retry);
+    }
 
     if (retry == 0) {
         ESP_LOGE(LOGNAME, "MLX90640 init failure.");
@@ -376,9 +373,19 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
         }
         esp_restart();
     }
+    xSemaphoreTake(_flash_locker, portMAX_DELAY);
+    _mlx.setRate(
+        (m5::MLX90640_Class::refresh_rate_t)_reg_tx_data.config.refresh_rate);
+    xSemaphoreGive(_flash_locker);
+
+    for (int i = 0; i < 4; ++i) {
+        _mlx_framedatas[i] = (uint16_t*)heap_caps_malloc(
+            m5::MLX90640_Class::FRAME_DATA_BYTES, MALLOC_CAP_DMA);
+        memset(_mlx_framedatas[i], 0x2C, m5::MLX90640_Class::FRAME_DATA_BYTES);
+    }
 
     // running...
-    size_t discard_count = 0;
+    size_t discard_count = 2;
     while (_firmupdate_state == nothing) {
         if ((uint8_t)_mlx.getRate() !=
             (uint8_t)_reg_tx_data.config.refresh_rate) {
@@ -411,13 +418,21 @@ static void IRAM_ATTR i2cMasterTask(void* main_handle) {
 }
 
 static void validateRegData(void) {
-    uint_fast8_t i2c_addr = _reg_tx_data.config.i2c_addr;
-    if (0xFF != (i2c_addr ^ _reg_tx_data.config.i2c_addr_inv) ||
+    uint_fast8_t i2c_addr = _reg_rx_data.config.i2c_addr;
+    if (0xFF != (i2c_addr ^ _reg_rx_data.config.i2c_addr_inv) ||
         i2c_addr < 0x08 || i2c_addr >= 0x78) {
         ESP_LOGI(LOGNAME, "invalid i2c_addr:%02x  use default addr:%02x",
                  i2c_addr, I2C_DEFAULT_ADDR);
-        _reg_tx_data.config.i2c_addr     = I2C_DEFAULT_ADDR;
-        _reg_tx_data.config.i2c_addr_inv = ~I2C_DEFAULT_ADDR;
+        _reg_rx_data.config.i2c_addr     = I2C_DEFAULT_ADDR;
+        _reg_rx_data.config.i2c_addr_inv = ~I2C_DEFAULT_ADDR;
+    }
+
+    // Buzzer alarm minimum interval is 50ms.
+    if (_reg_rx_data.lowest_alarm.buzzer_interval < 5) {
+        _reg_rx_data.lowest_alarm.buzzer_interval = 5;
+    }
+    if (_reg_rx_data.highest_alarm.buzzer_interval < 5) {
+        _reg_rx_data.highest_alarm.buzzer_interval = 5;
     }
 }
 
@@ -469,41 +484,11 @@ static void IRAM_ATTR save_nvs(void) {
 }
 
 static void IRAM_ATTR load_nvs(void) {
-    memset(_i2c_tx_data, 0, UNIT_REGISTER_SIZE);
     memset(_i2c_rx_data, 0, UNIT_REGISTER_SIZE);
-
-    // Register data initial value setting.
-    _reg_rx_data.status.device_id_0   = DEVICE_ID_0;             // Device ID
-    _reg_rx_data.status.device_id_1   = DEVICE_ID_1;             // Device ID
-    _reg_rx_data.status.version_major = FIRMWARE_MAJOR_VERSION;  // major ver
-    _reg_rx_data.status.version_minor = FIRMWARE_MINOR_VERSION;  // minor ver
-
-    _reg_rx_data.config.i2c_addr          = I2C_DEFAULT_ADDR;
-    _reg_rx_data.config.i2c_addr_inv      = ~I2C_DEFAULT_ADDR;
-    _reg_rx_data.config.function_ctrl     = 4;
-    _reg_rx_data.config.refresh_rate      = _reg_rx_data.rate_16Hz;
-    _reg_rx_data.config.noise_filter      = 4;
-    _reg_rx_data.config.buzzer_volume     = 128;
-    _reg_rx_data.config.buzzer_freq       = 4800;
-    _reg_rx_data.config.temp_alarm_area   = 0xFF;
-    _reg_rx_data.config.temp_alarm_enable = 0;
-
-    _reg_rx_data.lowest_alarm.buzzer_interval = 5;
-    _reg_rx_data.lowest_alarm.buzzer_freq     = 4800;
-    _reg_rx_data.lowest_alarm.temp_threshold  = (0 + 64) * 128;
-    _reg_rx_data.lowest_alarm.led.r           = 0;
-    _reg_rx_data.lowest_alarm.led.g           = 0;
-    _reg_rx_data.lowest_alarm.led.b           = 4;
-
-    _reg_rx_data.highest_alarm.buzzer_interval = 5;
-    _reg_rx_data.highest_alarm.buzzer_freq     = 4800;
-    _reg_rx_data.highest_alarm.temp_threshold  = (100 + 64) * 128;
-    _reg_rx_data.highest_alarm.led.r           = 4;
-    _reg_rx_data.highest_alarm.led.g           = 0;
-    _reg_rx_data.highest_alarm.led.b           = 0;
 
     ESP_LOGI(LOGNAME, "load_nvs");
     uint32_t handle;
+    bool loaded    = false;
     esp_err_t init = nvs_flash_init();
     if (ESP_OK != init) {
         ESP_LOGE(LOGNAME, "nvs flash init error. %d", init);
@@ -517,27 +502,53 @@ static void IRAM_ATTR load_nvs(void) {
         }
         ESP_LOGI(LOGNAME, "done.");
 
-        save_nvs();
+        _save_nvs_countdown = 1;
     } else {
         size_t len = sizeof(unit_thermal2_reg_t) - REGISTER_WRITABLE_OFFSET;
-        if (ESP_OK != nvs_get_blob(handle, NVS_KEY_REGDATA,
-                                   &_i2c_rx_data[REGISTER_WRITABLE_OFFSET],
-                                   &len)) {
-            ESP_LOGE(LOGNAME, "nvs error: can't get address.");
+        loaded     = (ESP_OK ==
+                  nvs_get_blob(handle, NVS_KEY_REGDATA,
+                                   &_i2c_rx_data[REGISTER_WRITABLE_OFFSET], &len));
+        if (!loaded) {
+            ESP_LOGE(LOGNAME, "nvs error: can't get regdata.");
         }
         nvs_close(handle);
     }
-    // Buzzer alarm minimum interval is 50ms.
-    if (_reg_rx_data.lowest_alarm.buzzer_interval < 5) {
+
+    // Register data initial value setting.
+    _reg_rx_data.status.device_id_0   = DEVICE_ID_0;             // Device ID
+    _reg_rx_data.status.device_id_1   = DEVICE_ID_1;             // Device ID
+    _reg_rx_data.status.version_major = FIRMWARE_MAJOR_VERSION;  // major ver
+    _reg_rx_data.status.version_minor = FIRMWARE_MINOR_VERSION;  // minor ver
+
+    if (loaded) {
+        validateRegData();
+    } else {
+        _reg_rx_data.config.i2c_addr          = I2C_DEFAULT_ADDR;
+        _reg_rx_data.config.i2c_addr_inv      = ~I2C_DEFAULT_ADDR;
+        _reg_rx_data.config.function_ctrl     = 4;
+        _reg_rx_data.config.refresh_rate      = _reg_rx_data.rate_16Hz;
+        _reg_rx_data.config.noise_filter      = 4;
+        _reg_rx_data.config.buzzer_volume     = 128;
+        _reg_rx_data.config.buzzer_freq       = 4800;
+        _reg_rx_data.config.temp_alarm_area   = 0xFF;
+        _reg_rx_data.config.temp_alarm_enable = 0;
+
         _reg_rx_data.lowest_alarm.buzzer_interval = 5;
-    }
-    if (_reg_rx_data.highest_alarm.buzzer_interval < 5) {
+        _reg_rx_data.lowest_alarm.buzzer_freq     = 4800;
+        _reg_rx_data.lowest_alarm.temp_threshold  = (0 + 64) * 128;
+        _reg_rx_data.lowest_alarm.led.r           = 0;
+        _reg_rx_data.lowest_alarm.led.g           = 0;
+        _reg_rx_data.lowest_alarm.led.b           = 4;
+
         _reg_rx_data.highest_alarm.buzzer_interval = 5;
+        _reg_rx_data.highest_alarm.buzzer_freq     = 4800;
+        _reg_rx_data.highest_alarm.temp_threshold  = (100 + 64) * 128;
+        _reg_rx_data.highest_alarm.led.r           = 4;
+        _reg_rx_data.highest_alarm.led.g           = 0;
+        _reg_rx_data.highest_alarm.led.b           = 0;
     }
 
     memcpy(&_reg_tx_data, &_reg_rx_data, sizeof(unit_thermal2_reg_t));
-
-    validateRegData();
 
 #if CORE_DEBUG_LEVEL > 0
     auto d = (const uint8_t*)&_reg_tx_data;
@@ -617,31 +628,16 @@ static bool IRAM_ATTR command(void) {
 }
 
 void setup(void) {
-    rtc_clk_cpu_freq_mhz_to_config(160, &_cpu_freq_conf_160);
-    rtc_clk_cpu_freq_mhz_to_config(80, &_cpu_freq_conf_80);
+    xTaskCreatePinnedToCore(core0Task, "core0Task", 8192,
+                            xTaskGetCurrentTaskHandle(), 20, nullptr,
+                            PRO_CPU_NUM);
+    load_nvs();
+    _i2c_ex.init(I2C_NUM_1, PIN_EX_SDA, PIN_EX_SCL,
+                 _reg_tx_data.config.i2c_addr);
+    ESP_LOGI(LOGNAME, "I2C_SLAVE init: addr=0x%02x",
+             _reg_tx_data.config.i2c_addr);
 
     _flash_locker = xSemaphoreCreateMutex();
-    load_nvs();
-
-    rtc_clk_cpu_freq_set_config_fast(&_cpu_freq_conf_80);
-
-    xTaskCreatePinnedToCore(i2cMasterTask, "i2cMasterTask", 8192,
-                            xTaskGetCurrentTaskHandle(), 1, nullptr,
-                            PRO_CPU_NUM);
-
-    for (int i = 0; i < 4; ++i) {
-        _mlx_framedatas[i] = (uint16_t*)heap_caps_malloc(
-            m5::MLX90640_Class::FRAME_DATA_BYTES, MALLOC_CAP_DMA);
-        memset(_mlx_framedatas[i], 0x2C, m5::MLX90640_Class::FRAME_DATA_BYTES);
-    }
-    for (int i = 0; i < MLX_TEMP_ARRAY_SIZE; ++i) {
-        _mlx_tempdatas[i] = (m5::MLX90640_Class::temp_data_t*)heap_caps_malloc(
-            sizeof(m5::MLX90640_Class::temp_data_t), MALLOC_CAP_DMA);
-        memset(_mlx_tempdatas[i], 0, sizeof(m5::MLX90640_Class::temp_data_t));
-    }
-    _diff_data = (int16_t*)heap_caps_malloc(m5::MLX90640_Class::TEMP_DATA_BYTES,
-                                            MALLOC_CAP_DMA);
-    memset(_diff_data, 0, m5::MLX90640_Class::TEMP_DATA_BYTES);
 
     gpio_config_t io_conf;
     io_conf.mode         = GPIO_MODE_DISABLE;
@@ -669,19 +665,25 @@ void setup(void) {
     ledcSetup(BUZZER_LEDC_CHAN, 1, 12);  // freq and bit_num.
     setBuzzer(0, 0);
 
-    ESP_LOGI(LOGNAME, "I2C_SLAVE init: addr=0x%02x",
-             _reg_tx_data.config.i2c_addr);
-    _i2c_ex.init(I2C_NUM_1, PIN_EX_SDA, PIN_EX_SCL,
-                 _reg_tx_data.config.i2c_addr);
+    for (int i = 0; i < MLX_TEMP_ARRAY_SIZE; ++i) {
+        _mlx_tempdatas[i] = (m5::MLX90640_Class::temp_data_t*)heap_caps_malloc(
+            sizeof(m5::MLX90640_Class::temp_data_t), MALLOC_CAP_DMA);
+        memset(_mlx_tempdatas[i], 0, sizeof(m5::MLX90640_Class::temp_data_t));
+    }
+    _diff_data = (int16_t*)heap_caps_malloc(m5::MLX90640_Class::TEMP_DATA_BYTES,
+                                            MALLOC_CAP_DMA);
+    memset(_diff_data, 0, m5::MLX90640_Class::TEMP_DATA_BYTES);
 
     TaskHandle_t idle = xTaskGetIdleTaskHandleForCPU(PRO_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
     idle = xTaskGetIdleTaskHandleForCPU(APP_CPU_NUM);
     if (idle != nullptr) esp_task_wdt_delete(idle);
 
-    do {
-        vTaskDelay(1);
-    } while (_idx_framedata == -1);
+    rtc_clk_cpu_freq_mhz_to_config(160, &_cpu_freq_conf_160);
+    rtc_clk_cpu_freq_mhz_to_config(80, &_cpu_freq_conf_80);
+    rtc_clk_cpu_freq_set_config_fast(&_cpu_freq_conf_80);
+
+    ulTaskNotifyTake(pdFALSE, 50);
 
     _led.setColor(0);
 }
@@ -827,9 +829,9 @@ void IRAM_ATTR loop(void) {
         }
     }
 
-    auto msec = millis();
+    uint32_t msec = esp_timer_get_time() / 1000ULL;
 
-    if (_temp_data) {
+    {
         if (reg_mod) {
             if (_reg_tx_data.config.function_ctrl !=
                 _reg_rx_data.config.function_ctrl) {
@@ -856,7 +858,7 @@ void IRAM_ATTR loop(void) {
 
             uint_fast8_t alarm = _reg_tx_data.config.temp_alarm_enable;
 
-            if (alarm) {
+            if (alarm && _temp_data) {
                 uint_fast16_t threshold_low =
                     _reg_tx_data.lowest_alarm.temp_threshold;
                 uint_fast16_t threshold_high =

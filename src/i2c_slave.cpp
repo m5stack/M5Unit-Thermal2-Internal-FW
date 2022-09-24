@@ -76,8 +76,7 @@ static __attribute__((always_inline)) inline std::uint32_t IRAM_ATTR
 getTxFifoCount(i2c_dev_t* dev) {
     return dev->status_reg.tx_fifo_cnt;
 }
-static __attribute__((always_inline)) inline void IRAM_ATTR
-updateDev(i2c_dev_t* dev) {
+static __attribute__((always_inline)) inline void updateDev(i2c_dev_t* dev) {
 }
 
 #endif
@@ -165,104 +164,99 @@ static void IRAM_ATTR i2c_isr_handler(void* arg) {
 /// I2C slave operation start processing.
 void setupTask(void* args) {
     auto i2c_slave = (I2C_Slave*)args;
-    auto i2c_port  = i2c_slave->getI2CPort();
-    if ((ESP_OK == i2c_set_pin(i2c_port, i2c_slave->getPinSDA(),
-                               i2c_slave->getPinSCL(), GPIO_PULLUP_ENABLE,
-                               GPIO_PULLUP_ENABLE, I2C_MODE_SLAVE)) &&
-        (ESP_OK == esp_intr_alloc(getPeriphIntSource(i2c_port),
-                                  ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3,
-                                  i2c_isr_handler, i2c_slave, nullptr))) {
-        auto dev         = getDev(i2c_port);
-        dev->int_ena.val = 0;
-
-        periph_module_enable(getPeriphModule(i2c_port));
-
-        dev->fifo_conf.tx_fifo_rst = 1;
-        dev->fifo_conf.tx_fifo_rst = 0;
-        dev->fifo_conf.rx_fifo_rst = 1;
-        dev->fifo_conf.rx_fifo_rst = 0;
-
-        typeof(dev->ctr) ctrl_reg;
-        ctrl_reg.val           = 0;
-        ctrl_reg.sda_force_out = 1;
-        ctrl_reg.scl_force_out = 1;
-        dev->ctr.val           = ctrl_reg.val;
-
-        dev->slave_addr.addr     = i2c_slave->getI2CAddr();
-        dev->slave_addr.en_10bit = 0;
-
-        dev->sda_hold.time   = i2c_slave_sda_hold_val;
-        dev->sda_sample.time = i2c_slave_sda_sample_val;
-
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-
-        dev->ctr.slv_tx_auto_start_en = 1;
-
-        dev->timeout.time_out_value = 31;
-        dev->timeout.time_out_en    = 0;
-
-        dev->filter_cfg.val       = 0;
-        dev->filter_cfg.scl_en    = 1;
-        dev->filter_cfg.scl_thres = 0;
-        dev->filter_cfg.sda_en    = 1;
-        dev->filter_cfg.sda_thres = 0;
-
-#else
-
-        dev->timeout.tout = 0xFFFFF;
-
-        dev->scl_filter_cfg.en    = 1;
-        dev->scl_filter_cfg.thres = 0;
-        dev->sda_filter_cfg.en    = 1;
-        dev->sda_filter_cfg.thres = 0;
-
-#endif
-
-#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S2)
-
-        typeof(dev->fifo_conf) fifo_conf;
-        fifo_conf.val              = 0;
-        fifo_conf.rx_fifo_wm_thrhd = i2c_rx_fifo_full_thresh_val;
-        fifo_conf.tx_fifo_wm_thrhd = i2c_tx_fifo_empty_thresh_val;
-        dev->fifo_conf.val         = fifo_conf.val;
-
-        dev->int_ena.val = I2C_TRANS_COMPLETE_INT_ENA |
-                           I2C_ARBITRATION_LOST_INT_ENA |
-                           I2C_BYTE_TRANS_DONE_INT_ENA | I2C_TXFIFO_WM_INT_ENA |
-                           I2C_RXFIFO_WM_INT_ENA;
-
-#else
-
-        typeof(dev->fifo_conf) fifo_conf;
-        fifo_conf.val                 = 0;
-        fifo_conf.rx_fifo_full_thrhd  = i2c_rx_fifo_full_thresh_val;
-        fifo_conf.tx_fifo_empty_thrhd = i2c_tx_fifo_empty_thresh_val;
-        dev->fifo_conf.val            = fifo_conf.val;
-
-        dev->int_ena.val =
-            I2C_TRANS_COMPLETE_INT_ENA | I2C_TRANS_START_INT_ENA |
-            I2C_ARBITRATION_LOST_INT_ENA | I2C_SLAVE_TRAN_COMP_INT_ENA |
-            I2C_TXFIFO_EMPTY_INT_ENA | I2C_RXFIFO_FULL_INT_ENA;
-
-#endif
-
-        updateDev(dev);
-    }
+    esp_intr_alloc(getPeriphIntSource(i2c_slave->getI2CPort()),
+                   ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3, i2c_isr_handler,
+                   i2c_slave, nullptr);
     vTaskDelete(nullptr);
 }
 
 bool I2C_Slave::init(int i2c_port, int pin_sda, int pin_scl, int i2c_addr) {
-    _i2c_port       = (i2c_port_t)i2c_port;
+    _i2c_port = (i2c_port_t)i2c_port;
+
+    auto dev         = getDev(i2c_port);
+    dev->int_ena.val = 0;
+    dev->int_clr.val = ~0u;
+
+    /// I2C peripheral setup in core0.
+    /// (※ Running setup on core1 causes ISR to run on core1.)
+    xTaskCreatePinnedToCore(setupTask, "setupTask", 4096, this, 21, nullptr,
+                            PRO_CPU_NUM);
+
     _i2c_addr       = i2c_addr;
     _pin_sda        = pin_sda;
     _pin_scl        = pin_scl;
     _mainTaskHandle = xTaskGetCurrentTaskHandle();
 
-    /// I2C peripheral setup in core0.
-    /// (※ Running setup on core1 causes ISR to run on core1.)
-    xTaskCreatePinnedToCore(setupTask, "setupTask", 4096, this, 0, nullptr,
-                            PRO_CPU_NUM);
-    return true;
+    periph_module_enable(getPeriphModule(i2c_port));
+
+    typeof(dev->ctr) ctrl_reg;
+    ctrl_reg.val           = 0;
+    ctrl_reg.sda_force_out = 1;
+    ctrl_reg.scl_force_out = 1;
+    dev->ctr.val           = ctrl_reg.val;
+
+    dev->slave_addr.val = i2c_addr;
+
+    dev->sda_hold.time   = i2c_slave_sda_hold_val;
+    dev->sda_sample.time = i2c_slave_sda_sample_val;
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+
+    dev->ctr.slv_tx_auto_start_en = 1;
+
+    dev->timeout.time_out_value = 31;
+    dev->timeout.time_out_en    = 0;
+
+    dev->filter_cfg.val       = 0;
+    dev->filter_cfg.scl_en    = 1;
+    dev->filter_cfg.scl_thres = 0;
+    dev->filter_cfg.sda_en    = 1;
+    dev->filter_cfg.sda_thres = 0;
+
+#else
+
+    dev->timeout.tout = 0xFFFFF;
+
+    dev->scl_filter_cfg.en    = 1;
+    dev->scl_filter_cfg.thres = 0;
+    dev->sda_filter_cfg.en    = 1;
+    dev->sda_filter_cfg.thres = 0;
+
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S2)
+
+    typeof(dev->fifo_conf) fifo_conf;
+    fifo_conf.val              = 0;
+    fifo_conf.rx_fifo_wm_thrhd = i2c_rx_fifo_full_thresh_val;
+    fifo_conf.tx_fifo_wm_thrhd = i2c_tx_fifo_empty_thresh_val;
+    dev->fifo_conf.val         = fifo_conf.val;
+
+    dev->int_ena.val = I2C_TRANS_COMPLETE_INT_ENA |
+                       I2C_ARBITRATION_LOST_INT_ENA |
+                       I2C_BYTE_TRANS_DONE_INT_ENA | I2C_TXFIFO_WM_INT_ENA |
+                       I2C_RXFIFO_WM_INT_ENA;
+
+#else
+
+    typeof(dev->fifo_conf) fifo_conf;
+    fifo_conf.val                 = 0;
+    fifo_conf.rx_fifo_full_thrhd  = i2c_rx_fifo_full_thresh_val;
+    fifo_conf.tx_fifo_empty_thrhd = i2c_tx_fifo_empty_thresh_val;
+    dev->fifo_conf.val            = fifo_conf.val;
+
+    dev->int_ena.val = I2C_TRANS_COMPLETE_INT_ENA | I2C_TRANS_START_INT_ENA |
+                       I2C_ARBITRATION_LOST_INT_ENA |
+                       I2C_SLAVE_TRAN_COMP_INT_ENA | I2C_TXFIFO_EMPTY_INT_ENA |
+                       I2C_RXFIFO_FULL_INT_ENA;
+
+#endif
+
+    updateDev(dev);
+
+    return ((ESP_OK == i2c_set_pin((i2c_port_t)i2c_port, pin_sda, pin_scl,
+                                   GPIO_PULLUP_DISABLE, GPIO_PULLUP_DISABLE,
+                                   I2C_MODE_SLAVE)));
 }
 
 void I2C_Slave::release(void) {
