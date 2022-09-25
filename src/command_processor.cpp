@@ -132,9 +132,9 @@ static rtc_cpu_freq_config_t _cpu_freq_conf_160;
 static rtc_cpu_freq_config_t _cpu_freq_conf_80;
 
 #include <driver/gpio.h>
+#include <driver/ledc.h>
 #include <esp_log.h>
 #include <esp_task_wdt.h>
-#include <esp32-hal-ledc.h>
 #include <nvs_flash.h>
 
 #include <cstdint>
@@ -252,7 +252,7 @@ static constexpr uint8_t DRAM_ATTR
 static constexpr uint8_t DRAM_ATTR
     REGISTER_DIRECT_WRITE_MAP[(REGISTER_WRITABLE_MAP_SIZE + 7) >> 3] = {
         0x00, 0xD8,  // 0x00 - 0x0F
-        0xFF, 0x00,  // 0x10 - 0x1F
+        0xC0, 0x00,  // 0x10 - 0x1F
         0xFF, 0x00,  // 0x20 - 0x2F
         0xFF, 0x00,  // 0x30 - 0x3F
         0x00, 0x00,  // 0x40 - 0x4F
@@ -310,17 +310,35 @@ static inline void gpio_lo(int_fast8_t pin) { *get_gpio_lo_reg(pin) = 1 << (pin 
 
 static void setBuzzer(uint32_t freq, uint32_t volume) {
     static uint32_t prev_freq = ~0u;
-    if (freq && volume) {
-        if (prev_freq != freq) {
-            prev_freq = freq;
-            ledcWriteTone(BUZZER_LEDC_CHAN, freq);
-        }
+    static uint32_t prev_duty = ~0u;
+
+    static constexpr auto group   = (ledc_mode_t)(BUZZER_LEDC_CHAN >> 3);
+    static constexpr auto timer   = (ledc_timer_t)((BUZZER_LEDC_CHAN >> 1) & 3);
+    static constexpr auto channel = (ledc_channel_t)((BUZZER_LEDC_CHAN)&7);
+
+    if (prev_freq != freq) {
+        prev_freq = freq;
+        ledc_timer_config_t ledc_timer;
+        ledc_timer.speed_mode      = LEDC_HIGH_SPEED_MODE;
+        ledc_timer.timer_num       = timer;
+        ledc_timer.duty_resolution = LEDC_TIMER_10_BIT;
+        ledc_timer.freq_hz         = freq;
+        ledc_timer.clk_cfg         = LEDC_USE_APB_CLK;
+        ledc_timer_config(&ledc_timer);
+    }
+    if (freq == 0) {
+        volume = 0;
+    }
+    uint32_t duty = 0;
+    if (volume) {
         ++volume;
-        ledcWrite(BUZZER_LEDC_CHAN, (volume * volume) >> 7);
-        *(uint32_t*)GPIO_FUNC25_OUT_SEL_CFG_REG = 0x48;
-    } else {
-        *(uint32_t*)GPIO_FUNC25_OUT_SEL_CFG_REG = 0x100;
-        ledcWrite(BUZZER_LEDC_CHAN, 0);
+        duty = (volume * volume) >> 7;
+    }
+    if (prev_duty != duty) {
+        prev_duty = duty;
+        ledc_set_duty(group, channel, duty);
+        ledc_update_duty(group, channel);
+        *(uint32_t*)GPIO_FUNC25_OUT_SEL_CFG_REG = duty ? 0x48 : 0x100;
     }
 }
 
@@ -661,8 +679,19 @@ void setup(void) {
     gpio_config(&io_conf);
 
     // buzzer start beep
-    ledcAttachPin(PIN_BUZZER, BUZZER_LEDC_CHAN);
-    ledcSetup(BUZZER_LEDC_CHAN, 1, 12);  // freq and bit_num.
+    static constexpr auto group   = (ledc_mode_t)(BUZZER_LEDC_CHAN >> 3);
+    static constexpr auto channel = (ledc_channel_t)((BUZZER_LEDC_CHAN)&7);
+    static constexpr auto timer   = (ledc_timer_t)((BUZZER_LEDC_CHAN >> 1) & 3);
+
+    ledc_channel_config_t ledc_channel;
+    ledc_channel.speed_mode = group;
+    ledc_channel.channel    = channel;
+    ledc_channel.timer_sel  = timer;
+    ledc_channel.intr_type  = LEDC_INTR_DISABLE;
+    ledc_channel.gpio_num   = PIN_BUZZER;
+    ledc_channel.duty       = 0;
+    ledc_channel.hpoint     = 0;
+    ledc_channel_config(&ledc_channel);
     setBuzzer(0, 0);
 
     for (int i = 0; i < MLX_TEMP_ARRAY_SIZE; ++i) {
@@ -832,16 +861,28 @@ void IRAM_ATTR loop(void) {
     uint32_t msec = esp_timer_get_time() / 1000ULL;
 
     {
-        if (reg_mod) {
-            if (_reg_tx_data.config.function_ctrl !=
-                _reg_rx_data.config.function_ctrl) {
-                _alarm_last_time = msec + _alarm_interval + 1;
-                if (_save_nvs_countdown == 0) {
-                    _save_nvs_countdown = 16;
+        if (reg_mod && (_reg_tx_data.config != _reg_rx_data.config)) {
+            bool chg = _reg_tx_data.config.function_ctrl !=
+                           _reg_rx_data.config.function_ctrl ||
+                       _reg_tx_data.config.buzzer_freq !=
+                           _reg_rx_data.config.buzzer_freq ||
+                       _reg_tx_data.config.buzzer_volume !=
+                           _reg_rx_data.config.buzzer_volume ||
+                       _reg_tx_data.config.led != _reg_rx_data.config.led;
+            if (chg) {
+                _reg_tx_data.config.function_ctrl =
+                    _reg_rx_data.config.function_ctrl;
+                _reg_tx_data.config.buzzer_freq =
+                    _reg_rx_data.config.buzzer_freq;
+                _reg_tx_data.config.buzzer_volume =
+                    _reg_rx_data.config.buzzer_volume;
+                _reg_tx_data.config.led = _reg_rx_data.config.led;
+
+                if (_current_alarm_state == alarm_state_t::alarm_none) {
+                    _current_alarm_state = alarm_state_t::alarm_change_setting;
+                    _alarm_last_time     = msec + _alarm_interval + 1;
+                    _save_nvs_countdown  = 16;
                 }
-            }
-            if (_current_alarm_state == alarm_none) {
-                _current_alarm_state = alarm_change_setting;
             }
         }
         // temperature alarm check.
